@@ -3,7 +3,7 @@ export type Orientation = 'h' | 'v'
 export type Move = { player: Player; orientation: Orientation; row: number; column: number }
 export type GameState = { edges: Record<string, Player>; boxes: Record<string, Player>; scores: Record<Player, number>; currentPlayer: Player; status: 'playing' | 'finished' }
 
-const DOTS = 7
+export const DOTS = 6
 const other = (player: Player): Player => player === 'one' ? 'two' : 'one'
 const edgeKey = (orientation: Orientation, row: number, column: number) => `${orientation}:${row}:${column}`
 const boxKey = (row: number, column: number) => `${row}:${column}`

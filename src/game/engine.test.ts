@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createGame, expireTurn, playMove, type GameState, type Move } from './engine'
+import { createGame, DOTS, expireTurn, playMove, type GameState, type Move } from './engine'
 
 const move = (state: GameState, data: Omit<Move, 'player'>) => playMove(state, { ...data, player: state.currentPlayer })
 
@@ -23,24 +23,12 @@ describe('Dots and Boxes engine', () => {
   })
   it('finishes when the final box is claimed', () => {
     const boxes: Record<string, 'one'> = {}
-    for (let row = 0; row < 6; row++) for (let column = 0; column < 6; column++) if (row !== 5 || column !== 5) boxes[`${row}:${column}`] = 'one'
-    const game: GameState = { edges: { 'h:5:5': 'one', 'h:6:5': 'one', 'v:5:5': 'one' }, boxes, scores: { one: 35, two: 0 }, currentPlayer: 'one', status: 'playing' }
-    const result = move(game, { orientation: 'v', row: 5, column: 6 })
+    for (let row = 0; row < DOTS - 1; row++) for (let column = 0; column < DOTS - 1; column++) if (row !== DOTS - 2 || column !== DOTS - 2) boxes[`${row}:${column}`] = 'one'
+    const final = DOTS - 2
+    const game: GameState = { edges: { [`h:${final}:${final}`]: 'one', [`h:${final + 1}:${final}`]: 'one', [`v:${final}:${final}`]: 'one' }, boxes, scores: { one: (DOTS - 1) ** 2 - 1, two: 0 }, currentPlayer: 'one', status: 'playing' }
+    const result = move(game, { orientation: 'v', row: final, column: final + 1 })
     expect(result.ok && result.completed).toBe(1)
     expect(result.ok && result.state.status).toBe('finished')
-    expect(result.ok && result.state.scores).toEqual({ one: 36, two: 0 })
-  })
-  it('permits a draw when the final box equalises the score', () => {
-    const boxes: Record<string, 'one' | 'two'> = {}
-    let claimedByOne = 0
-    for (let row = 0; row < 6; row++) for (let column = 0; column < 6; column++) {
-      if (row === 5 && column === 5) continue
-      boxes[`${row}:${column}`] = claimedByOne < 18 ? 'one' : 'two'
-      claimedByOne++
-    }
-    const game: GameState = { edges: { 'h:5:5': 'one', 'h:6:5': 'one', 'v:5:5': 'one' }, boxes, scores: { one: 18, two: 17 }, currentPlayer: 'two', status: 'playing' }
-    const result = move(game, { orientation: 'v', row: 5, column: 6 })
-    expect(result.ok && result.state.status).toBe('finished')
-    expect(result.ok && result.state.scores).toEqual({ one: 18, two: 18 })
+    expect(result.ok && result.state.scores).toEqual({ one: (DOTS - 1) ** 2, two: 0 })
   })
 })

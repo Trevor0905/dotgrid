@@ -144,7 +144,7 @@ export class MatchRoom {
   }
 }
 
-export default {
+const worker: ExportedHandler<Env> = {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url)
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors(request, env) })
@@ -152,7 +152,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/matches') {
       const code = randomCode()
       const room = env.MATCH_ROOMS.getByName(code)
-      return withCors(await room.fetch(`https://match-room/create?code=${code}`), request, env)
+      const roomRequest = new Request(`https://match-room/create?code=${code}`, { method: 'POST' })
+      return withCors(await room.fetch(roomRequest), request, env)
     }
     const match = /^\/matches\/([A-Z0-9]{8})\/(join|connect)$/.exec(url.pathname)
     if (!match) return withCors(json({ error: 'Not found.' }, { status: 404 }), request, env)
@@ -163,4 +164,6 @@ export default {
     const roomRequest = new Request(roomUrl, request)
     return withCors(await room.fetch(roomRequest), request, env)
   },
-} satisfies ExportedHandler<Env>
+}
+
+export default worker

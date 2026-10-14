@@ -1,12 +1,5 @@
 # Vatar integration notes
 
-Verified from the public Vatar docs on 14 October 2026:
+Vatar is not integrated in the staging build. Do not add an SDK, credentials, player identity flow, match lifecycle, payments, wagers, or result submission until the owner provides official sandbox documentation and credentials.
 
-- `Vatar.init()` returns player data and a short-lived session.
-- Player panels in a live match will use the permitted Vatar player display names and avatars for the two match participants; the local demo's labels are placeholders only.
-- `Vatar.match.quick({ stake: 0 })` supports friendly quick matches; create/join supports private match codes.
-- Vatar updates match lifecycle, but DotGrid must run gameplay on its own server.
-- The server verifies sessions with `POST /session/verify` and posts the final signed result.
-- Production hosting must be HTTPS and send the documented `frame-ancestors` CSP header.
-
-Open questions to resolve during sandbox integration: the exact reliable gameplay transport, the platform's review expectation for a test-only purchase when MVP has no products, and the final handling of match/disconnect states.
+The current staging match flow uses the Cloudflare Worker and Durable Objects only. Its opaque participant tokens are temporary and must be replaced—not extended—when the documented Vatar identity/session flow becomes available.

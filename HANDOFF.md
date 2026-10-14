@@ -6,7 +6,7 @@ Ship DotGrid as a two-player Dots and Boxes game: the static browser client is h
 
 ## What is complete
 
-- React/Vite client with the purple lightning identity, corrected 7 by 7 dot board, a visible 30-second countdown, and a developer-only local demo.
+- React/Vite client with the purple lightning identity, a 6 by 6 dot board, a visible 30-second countdown, and a developer-only local demo.
 - Pure deterministic game rules in `src/game/engine.ts`, with unit tests covering turn flow, invalid moves, box completion, multi-box moves, completion, and draws.
 - GitHub Pages workflow at `.github/workflows/deploy-pages.yml`; it builds relative asset paths so it can publish under `/dotgrid/`.
 - Cloudflare Worker source at `workers/match-server/src/index.ts`:

@@ -37,7 +37,16 @@ This deploys the current test-only local demo. Do not create a Vatar draft or pr
 
 `workers/match-server` is the Cloudflare Worker/Durable Object service for two-browser staging matches. It is intentionally separate from GitHub Pages because the server—not either browser—is authoritative for match membership, moves, turns, the 30-second timer, scores, and state.
 
-Before deployment, set its `ALLOWED_ORIGIN` value in `workers/match-server/wrangler.jsonc` to the final GitHub Pages URL, then run:
+The staging client is configured with the deployed Worker address internally. Players create or join a friend-code match and never enter a server URL.
+
+Route contract:
+
+- `GET /health` checks server availability.
+- `POST /matches` creates a two-player match.
+- `POST /matches/:code/join` joins a valid friend-code match.
+- `GET /matches/:code/connect?token=...` upgrades the verified player to a WebSocket.
+
+Before deployment, set its `ALLOWED_ORIGIN` value in `workers/match-server/wrangler.jsonc` to the Pages **origin** (for this project, `https://trevor0905.github.io`, without `/dotgrid`), then run:
 
 ```bash
 pnpm worker:check
