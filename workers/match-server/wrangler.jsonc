@@ -1,0 +1,17 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "dotgrid-match-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-14",
+  "durable_objects": {
+    "bindings": [
+      { "name": "MATCH_ROOMS", "class_name": "MatchRoom" }
+    ]
+  },
+  "exports": {
+    "MatchRoom": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "vars": {
+    "ALLOWED_ORIGIN": "http://localhost:5173"
+  }
+}

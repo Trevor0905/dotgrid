@@ -1,0 +1,2 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+:root { font-family: Manrope, Arial, sans-serif; color: #f7f4ed; background: #101b38; font-synthesis: none; text-rendering: optimizeLegibility; } * { box-sizing: border-box; } body { margin: 0; min-width: 320px; } button, a { font: inherit; } button { cursor: pointer; } button:focus-visible, a:focus-visible { outline: 3px solid #f8ce66; outline-offset: 3px; }
