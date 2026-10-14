@@ -46,6 +46,8 @@ Route contract:
 - `POST /matches/:code/join` joins a valid friend-code match.
 - `GET /matches/:code/connect?token=...` upgrades the verified player to a WebSocket.
 
+Match lifecycle: creation and joining only reserve the two friend-code seats. The match remains in a waiting lobby with no running timer until both verified player WebSockets are connected. The Worker then starts Player 1's 30-second turn automatically. If either player disconnects, it pauses the clock and resumes the remaining turn time only after both reconnect.
+
 Before deployment, set its `ALLOWED_ORIGIN` value in `workers/match-server/wrangler.jsonc` to the Pages **origin** (for this project, `https://trevor0905.github.io`, without `/dotgrid`), then run:
 
 ```bash

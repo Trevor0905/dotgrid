@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import worker from './index'
+import worker, { MatchRoom } from './index'
+import { createGame } from '../../../src/game/engine'
 
 const allowedOrigin = 'https://trevor0905.github.io'
 
@@ -62,5 +63,46 @@ describe('match Worker routes', () => {
     expect(result.status).toBe(200)
     expect(result.headers.get('access-control-allow-origin')).toBe(allowedOrigin)
     expect(result.headers.get('access-control-allow-methods')).toContain('POST')
+  })
+})
+
+describe('match room lifecycle', () => {
+  it('keeps a newly-created room waiting with no timer, then admits player two', async () => {
+    const values = new Map<string, unknown>()
+    const storage = {
+      get: vi.fn(async <T>(key: string) => values.get(key) as T | undefined),
+      put: vi.fn(async (key: string, value: unknown) => { values.set(key, value) }),
+      setAlarm: vi.fn(async () => undefined),
+      deleteAlarm: vi.fn(async () => undefined),
+    }
+    const state = { storage, getWebSockets: vi.fn(() => []) } as unknown as DurableObjectState
+    const room = new MatchRoom(state)
+
+    const created = await room.fetch(new Request('https://match-room/create?code=AB12CD34', { method: 'POST' }))
+    const createdBody = await created.json() as { player: string; state: { phase: string; deadline: number; game: { scores: Record<string, number> } } }
+    expect(created.status).toBe(201)
+    expect(createdBody.player).toBe('one')
+    expect(createdBody.state.phase).toBe('waiting')
+    expect(createdBody.state.deadline).toBe(0)
+    expect(createdBody.state.game.scores).toEqual({ one: 0, two: 0 })
+    expect(storage.setAlarm).not.toHaveBeenCalled()
+
+    const joined = await room.fetch(new Request('https://match-room/join', { method: 'POST' }))
+    const joinedBody = await joined.json() as { player: string; state: { phase: string; deadline: number; joined: boolean } }
+    expect(joined.status).toBe(200)
+    expect(joinedBody.player).toBe('two')
+    expect(joinedBody.state).toMatchObject({ phase: 'waiting', deadline: 0, joined: true })
+    expect(storage.setAlarm).not.toHaveBeenCalled()
+  })
+
+  it('rejects a second player after the friend-code room is full', async () => {
+    const match = {
+      code: 'AB12CD34', players: { one: 'one-token', two: 'two-token' }, game: createGame(), phase: 'waiting', deadline: 0, pausedRemaining: null,
+    }
+    const storage = { get: vi.fn(async () => match), put: vi.fn(), setAlarm: vi.fn(), deleteAlarm: vi.fn() }
+    const room = new MatchRoom({ storage, getWebSockets: vi.fn(() => []) } as unknown as DurableObjectState)
+    const response = await room.fetch(new Request('https://match-room/join', { method: 'POST' }))
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toEqual({ error: 'This match already has two players.' })
   })
 })

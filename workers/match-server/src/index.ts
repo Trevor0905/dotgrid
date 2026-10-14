@@ -1,45 +1,27 @@
 import { createGame, expireTurn, playMove, type GameState, type Orientation, type Player } from '../../../src/game/engine'
 
-type Env = {
-  ALLOWED_ORIGIN: string
-  MATCH_ROOMS: DurableObjectNamespace
-}
-
-type StoredMatch = {
-  code: string
-  players: Partial<Record<Player, string>>
-  game: GameState
-  deadline: number
-}
-
+type Env = { ALLOWED_ORIGIN: string; MATCH_ROOMS: DurableObjectNamespace }
+type MatchPhase = 'waiting' | 'playing' | 'finished'
+type StoredMatch = { code: string; players: Partial<Record<Player, string>>; game: GameState; phase: MatchPhase; deadline: number; pausedRemaining: number | null }
 type SocketAttachment = { player: Player }
 
 const TURN_LENGTH_MS = 30_000
 const matchKey = 'match'
-
-const json = (body: unknown, init: ResponseInit = {}) => new Response(JSON.stringify(body), {
-  ...init,
-  headers: { 'content-type': 'application/json; charset=utf-8', ...init.headers },
-})
-
+const json = (body: unknown, init: ResponseInit = {}) => new Response(JSON.stringify(body), { ...init, headers: { 'content-type': 'application/json; charset=utf-8', ...init.headers } })
 const randomToken = () => crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '')
 const randomCode = () => crypto.randomUUID().replaceAll('-', '').slice(0, 8).toUpperCase()
 
 function cors(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get('origin')
-  return origin === env.ALLOWED_ORIGIN
-    ? { 'access-control-allow-origin': origin, vary: 'Origin', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type' }
-    : {}
+  return origin === env.ALLOWED_ORIGIN ? { 'access-control-allow-origin': origin, vary: 'Origin', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type' } : {}
 }
-
 function withCors(response: Response, request: Request, env: Env) {
   const headers = new Headers(response.headers)
   for (const [name, value] of Object.entries(cors(request, env))) headers.set(name, value)
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
-
-function snapshot(match: StoredMatch) {
-  return { type: 'state', code: match.code, game: match.game, deadline: match.deadline, joined: Boolean(match.players.two) }
+function snapshot(match: StoredMatch, connected: Player[], notice?: string) {
+  return { type: 'state', code: match.code, game: match.game, phase: match.phase, deadline: match.deadline, joined: Boolean(match.players.two), connected, ...(notice ? { notice } : {}) }
 }
 
 export class MatchRoom {
@@ -55,12 +37,10 @@ export class MatchRoom {
   }
 
   private async create(url: URL) {
-    const existing = await this.state.storage.get<StoredMatch>(matchKey)
-    if (existing) return json({ error: 'This match already exists.' }, { status: 409 })
-    const code = url.searchParams.get('code') ?? randomCode()
-    const match: StoredMatch = { code, players: { one: randomToken() }, game: createGame(), deadline: Date.now() + TURN_LENGTH_MS }
+    if (await this.state.storage.get<StoredMatch>(matchKey)) return json({ error: 'This match already exists.' }, { status: 409 })
+    const match: StoredMatch = { code: url.searchParams.get('code') ?? randomCode(), players: { one: randomToken() }, game: createGame(), phase: 'waiting', deadline: 0, pausedRemaining: null }
     await this.save(match)
-    return json({ code: match.code, player: 'one', token: match.players.one, state: snapshot(match) }, { status: 201 })
+    return json({ code: match.code, player: 'one', token: match.players.one, state: snapshot(match, []) }, { status: 201 })
   }
 
   private async join() {
@@ -69,8 +49,9 @@ export class MatchRoom {
     if (match.players.two) return json({ error: 'This match already has two players.' }, { status: 409 })
     match.players.two = randomToken()
     await this.save(match)
-    this.broadcast(snapshot(match))
-    return json({ code: match.code, player: 'two', token: match.players.two, state: snapshot(match) })
+    const state = snapshot(match, this.connectedPlayers())
+    this.broadcast(state)
+    return json({ code: match.code, player: 'two', token: match.players.two, state })
   }
 
   private async connect(url: URL) {
@@ -79,12 +60,16 @@ export class MatchRoom {
     const token = url.searchParams.get('token')
     const player = (Object.entries(match.players) as Array<[Player, string]>).find(([, value]) => value === token)?.[0]
     if (!player) return new Response('Invalid player session.', { status: 401 })
+    for (const existing of this.state.getWebSockets()) {
+      const attachment = existing.deserializeAttachment() as SocketAttachment | null
+      if (attachment?.player === player) existing.close(1000, 'Replaced by a newer connection.')
+    }
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
     this.state.acceptWebSocket(server)
     server.serializeAttachment({ player } satisfies SocketAttachment)
-    server.send(JSON.stringify(snapshot(match)))
-    this.broadcast({ type: 'presence', players: this.connectedPlayers() })
+    const notice = await this.reconcileConnections(match)
+    this.broadcast(snapshot(match, this.connectedPlayers(), notice))
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -97,51 +82,50 @@ export class MatchRoom {
     if (message.type !== 'move' || !message.orientation || message.row === undefined || message.column === undefined) return this.send(socket, { type: 'error', message: 'Unknown game message.' })
     const match = await this.load()
     if (!match) return socket.close(1011, 'Match no longer exists.')
+    if (match.phase === 'waiting') return this.send(socket, { type: 'error', message: 'Waiting for both players to connect before the match starts.' })
+    if (match.phase === 'finished') return this.send(socket, { type: 'error', message: 'This match is already complete.' })
+    if (!this.readyToPlay(match)) return this.send(socket, { type: 'error', message: 'The match is paused while a player reconnects.' })
     const result = playMove(match.game, { player: attachment.player, orientation: message.orientation, row: message.row, column: message.column })
     if (!result.ok) return this.send(socket, { type: 'error', message: result.reason })
     match.game = result.state
-    match.deadline = result.state.status === 'playing' ? Date.now() + TURN_LENGTH_MS : 0
+    if (result.state.status === 'finished') { match.phase = 'finished'; match.deadline = 0; match.pausedRemaining = null } else match.deadline = Date.now() + TURN_LENGTH_MS
     await this.save(match)
-    this.broadcast(snapshot(match))
+    this.broadcast(snapshot(match, this.connectedPlayers(), result.completed ? 'Box completed — take another turn.' : undefined))
   }
 
-  async webSocketClose() {
-    this.broadcast({ type: 'presence', players: this.connectedPlayers() })
-  }
-
+  async webSocketClose() { await this.publishConnectionChange() }
+  async webSocketError() { await this.publishConnectionChange() }
   async alarm() {
     const match = await this.load()
-    if (!match || match.game.status !== 'playing' || Date.now() < match.deadline) return
+    if (!match || match.phase !== 'playing' || !match.deadline || Date.now() < match.deadline) return
+    if (!this.readyToPlay(match)) return this.publishConnectionChange()
     const result = expireTurn(match.game)
     if (!result.ok) return
     match.game = result.state
     match.deadline = Date.now() + TURN_LENGTH_MS
     await this.save(match)
-    this.broadcast({ ...snapshot(match), notice: 'Turn expired. The move passed to the other player.' })
+    this.broadcast(snapshot(match, this.connectedPlayers(), 'Turn expired. The move passed to the other player.'))
   }
 
+  private async publishConnectionChange() {
+    const match = await this.load()
+    if (!match) return
+    const notice = await this.reconcileConnections(match)
+    this.broadcast(snapshot(match, this.connectedPlayers(), notice))
+  }
+  private async reconcileConnections(match: StoredMatch) {
+    const ready = this.readyToPlay(match)
+    if (match.phase === 'waiting' && ready) { match.phase = 'playing'; match.deadline = Date.now() + TURN_LENGTH_MS; match.pausedRemaining = null; await this.save(match); return 'Both players are connected. Player 1 starts.' }
+    if (match.phase === 'playing' && !ready) { match.pausedRemaining = match.deadline ? Math.max(1_000, match.deadline - Date.now()) : TURN_LENGTH_MS; match.deadline = 0; await this.save(match); return 'A player disconnected. The match is paused until they reconnect.' }
+    if (match.phase === 'playing' && ready && !match.deadline) { match.deadline = Date.now() + Math.max(1_000, match.pausedRemaining ?? TURN_LENGTH_MS); match.pausedRemaining = null; await this.save(match); return 'Both players are connected again. The turn timer resumed.' }
+    return undefined
+  }
+  private readyToPlay(match: StoredMatch) { const connected = new Set(this.connectedPlayers()); return Boolean(match.players.one && match.players.two && connected.has('one') && connected.has('two')) }
   private async load() { return this.state.storage.get<StoredMatch>(matchKey) }
-
-  private async save(match: StoredMatch) {
-    await this.state.storage.put(matchKey, match)
-    if (match.deadline) await this.state.storage.setAlarm(match.deadline)
-  }
-
-  private connectedPlayers() {
-    return this.state.getWebSockets().flatMap((socket) => {
-      const attachment = socket.deserializeAttachment() as SocketAttachment | null
-      return attachment ? [attachment.player] : []
-    })
-  }
-
-  private broadcast(message: unknown) {
-    const payload = JSON.stringify(message)
-    for (const socket of this.state.getWebSockets()) this.send(socket, payload, true)
-  }
-
-  private send(socket: WebSocket, message: unknown, serialized = false) {
-    try { socket.send(serialized ? message as string : JSON.stringify(message)) } catch { socket.close(1011, 'Connection unavailable.') }
-  }
+  private async save(match: StoredMatch) { await this.state.storage.put(matchKey, match); if (match.deadline) await this.state.storage.setAlarm(match.deadline); else await this.state.storage.deleteAlarm() }
+  private connectedPlayers() { const players = new Set<Player>(); for (const socket of this.state.getWebSockets()) { const attachment = socket.deserializeAttachment() as SocketAttachment | null; if (attachment) players.add(attachment.player) }; return [...players] }
+  private broadcast(message: unknown) { const payload = JSON.stringify(message); for (const socket of this.state.getWebSockets()) this.send(socket, payload, true) }
+  private send(socket: WebSocket, message: unknown, serialized = false) { try { socket.send(serialized ? message as string : JSON.stringify(message)) } catch { socket.close(1011, 'Connection unavailable.') } }
 }
 
 const worker: ExportedHandler<Env> = {
@@ -161,9 +145,7 @@ const worker: ExportedHandler<Env> = {
     const room = env.MATCH_ROOMS.getByName(code)
     const roomUrl = new URL(`https://match-room/${action}`)
     roomUrl.search = url.search
-    const roomRequest = new Request(roomUrl, request)
-    return withCors(await room.fetch(roomRequest), request, env)
+    return withCors(await room.fetch(new Request(roomUrl, request)), request, env)
   },
 }
-
 export default worker
