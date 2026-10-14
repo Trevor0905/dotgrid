@@ -12,6 +12,6 @@
     "MatchRoom": { "type": "durable-object", "storage": "sqlite" }
   },
   "vars": {
-    "ALLOWED_ORIGIN": "http://localhost:5173"
+    "ALLOWED_ORIGIN": "https://trevor0905.github.io"
   }
 }
