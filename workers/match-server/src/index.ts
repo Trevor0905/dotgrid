@@ -1,8 +1,8 @@
 import { createGame, expireTurn, playMove, type GameState, type Orientation, type Player } from '../../../src/game/engine'
 
 type Env = { ALLOWED_ORIGIN: string; MATCH_ROOMS: DurableObjectNamespace }
-type MatchPhase = 'waiting' | 'playing' | 'finished'
-type StoredMatch = { code: string; players: Partial<Record<Player, string>>; game: GameState; phase: MatchPhase; deadline: number; pausedRemaining: number | null }
+export type MatchPhase = 'waiting' | 'playing' | 'finished'
+export type StoredMatch = { code: string; players: Partial<Record<Player, string>>; game: GameState; phase: MatchPhase; deadline: number; pausedRemaining: number | null }
 type SocketAttachment = { player: Player }
 
 const TURN_LENGTH_MS = 30_000
@@ -22,6 +22,28 @@ function withCors(response: Response, request: Request, env: Env) {
 }
 function snapshot(match: StoredMatch, connected: Player[], notice?: string) {
   return { type: 'state', code: match.code, game: match.game, phase: match.phase, deadline: match.deadline, joined: Boolean(match.players.two), connected, ...(notice ? { notice } : {}) }
+}
+
+export function reconcileMatchConnections(match: StoredMatch, connected: Player[], now = Date.now()) {
+  const ready = Boolean(match.players.one && match.players.two && connected.includes('one') && connected.includes('two'))
+  const next = { ...match }
+  if (next.phase === 'waiting' && ready) {
+    next.phase = 'playing'
+    next.deadline = now + TURN_LENGTH_MS
+    next.pausedRemaining = null
+    return { match: next, changed: true, notice: 'Opponent connected — starting game.' }
+  }
+  if (next.phase === 'playing' && !ready) {
+    next.pausedRemaining = next.deadline ? Math.max(1_000, next.deadline - now) : TURN_LENGTH_MS
+    next.deadline = 0
+    return { match: next, changed: true, notice: 'A player disconnected. The match is paused until they reconnect.' }
+  }
+  if (next.phase === 'playing' && ready && !next.deadline) {
+    next.deadline = now + Math.max(1_000, next.pausedRemaining ?? TURN_LENGTH_MS)
+    next.pausedRemaining = null
+    return { match: next, changed: true, notice: 'Opponent reconnected — the turn timer resumed.' }
+  }
+  return { match: next, changed: false, notice: undefined }
 }
 
 export class MatchRoom {
@@ -68,8 +90,8 @@ export class MatchRoom {
     const [client, server] = Object.values(pair)
     this.state.acceptWebSocket(server)
     server.serializeAttachment({ player } satisfies SocketAttachment)
-    const notice = await this.reconcileConnections(match)
-    this.broadcast(snapshot(match, this.connectedPlayers(), notice))
+    const updated = await this.reconcileConnections(match)
+    this.broadcast(snapshot(updated.match, this.connectedPlayers(), updated.notice))
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -110,15 +132,13 @@ export class MatchRoom {
   private async publishConnectionChange() {
     const match = await this.load()
     if (!match) return
-    const notice = await this.reconcileConnections(match)
-    this.broadcast(snapshot(match, this.connectedPlayers(), notice))
+    const updated = await this.reconcileConnections(match)
+    this.broadcast(snapshot(updated.match, this.connectedPlayers(), updated.notice))
   }
   private async reconcileConnections(match: StoredMatch) {
-    const ready = this.readyToPlay(match)
-    if (match.phase === 'waiting' && ready) { match.phase = 'playing'; match.deadline = Date.now() + TURN_LENGTH_MS; match.pausedRemaining = null; await this.save(match); return 'Both players are connected. Player 1 starts.' }
-    if (match.phase === 'playing' && !ready) { match.pausedRemaining = match.deadline ? Math.max(1_000, match.deadline - Date.now()) : TURN_LENGTH_MS; match.deadline = 0; await this.save(match); return 'A player disconnected. The match is paused until they reconnect.' }
-    if (match.phase === 'playing' && ready && !match.deadline) { match.deadline = Date.now() + Math.max(1_000, match.pausedRemaining ?? TURN_LENGTH_MS); match.pausedRemaining = null; await this.save(match); return 'Both players are connected again. The turn timer resumed.' }
-    return undefined
+    const updated = reconcileMatchConnections(match, this.connectedPlayers())
+    if (updated.changed) await this.save(updated.match)
+    return updated
   }
   private readyToPlay(match: StoredMatch) { const connected = new Set(this.connectedPlayers()); return Boolean(match.players.one && match.players.two && connected.has('one') && connected.has('two')) }
   private async load() { return this.state.storage.get<StoredMatch>(matchKey) }
@@ -145,7 +165,10 @@ const worker: ExportedHandler<Env> = {
     const room = env.MATCH_ROOMS.getByName(code)
     const roomUrl = new URL(`https://match-room/${action}`)
     roomUrl.search = url.search
-    return withCors(await room.fetch(new Request(roomUrl, request)), request, env)
+    const response = await room.fetch(new Request(roomUrl, request))
+    // A 101 response carries the accepted WebSocket object. Re-wrapping it for CORS
+    // drops that object and makes every browser connection close immediately.
+    return action === 'connect' ? response : withCors(response, request, env)
   },
 }
 export default worker

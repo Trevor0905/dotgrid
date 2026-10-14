@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import worker, { MatchRoom } from './index'
+import worker, { MatchRoom, reconcileMatchConnections, type StoredMatch } from './index'
 import { createGame } from '../../../src/game/engine'
 
 const allowedOrigin = 'https://trevor0905.github.io'
 
-function createEnv(response = new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } })) {
+function createEnv(response: Response = new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } })) {
   const fetch = vi.fn(async () => response)
   const room = { fetch }
   const getByName = vi.fn(() => room)
@@ -47,6 +47,16 @@ describe('match Worker routes', () => {
     const forwarded = fetch.mock.calls[0][0] as Request
     expect(forwarded.method).toBe('POST')
     expect(forwarded.url).toBe('https://match-room/join')
+  })
+
+  it('preserves the Durable Object WebSocket upgrade response instead of CORS-wrapping it', async () => {
+    const upgrade = { status: 101, webSocket: {} } as unknown as Response
+    const { env, fetch } = createEnv(upgrade)
+    const request = new Request('https://worker.test/matches/AB12CD34/connect?token=valid', { headers: { upgrade: 'websocket' } })
+    const result = await worker.fetch(request, env, {} as ExecutionContext)
+    expect(result).toBe(upgrade)
+    const forwarded = fetch.mock.calls[0][0] as Request
+    expect(forwarded.url).toBe('https://match-room/connect?token=valid')
   })
 
   it('rejects an invalid match code before it reaches a Durable Object', async () => {
@@ -104,5 +114,25 @@ describe('match room lifecycle', () => {
     const response = await room.fetch(new Request('https://match-room/join', { method: 'POST' }))
     expect(response.status).toBe(409)
     await expect(response.json()).resolves.toEqual({ error: 'This match already has two players.' })
+  })
+})
+
+describe('connection readiness', () => {
+  const waitingMatch = (): StoredMatch => ({ code: 'AB12CD34', players: { one: 'one-token', two: 'two-token' }, game: createGame(), phase: 'waiting', deadline: 0, pausedRemaining: null })
+
+  it('does not start a reserved room until both authenticated sockets are connected', () => {
+    const result = reconcileMatchConnections(waitingMatch(), ['one'], 10_000)
+    expect(result.match.phase).toBe('waiting')
+    expect(result.match.deadline).toBe(0)
+    expect(result.changed).toBe(false)
+  })
+
+  it('starts and pauses/resumes the authoritative timer from connection state', () => {
+    const started = reconcileMatchConnections(waitingMatch(), ['one', 'two'], 10_000)
+    expect(started.match).toMatchObject({ phase: 'playing', deadline: 40_000, pausedRemaining: null })
+    const paused = reconcileMatchConnections(started.match, ['one'], 15_000)
+    expect(paused.match).toMatchObject({ phase: 'playing', deadline: 0, pausedRemaining: 25_000 })
+    const resumed = reconcileMatchConnections(paused.match, ['one', 'two'], 20_000)
+    expect(resumed.match).toMatchObject({ phase: 'playing', deadline: 45_000, pausedRemaining: null })
   })
 })

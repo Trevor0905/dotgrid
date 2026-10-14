@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createGame, DOTS, expireTurn, playMove, type GameState, type Orientation, type Player } from './game/engine'
 import { explainMatchError, matchEndpoint, matchSocketEndpoint } from './matchApi'
+import { copyText, inviteUrl, matchCodeFromLocation, whatsappInvite } from './matchShare'
 import logoUrl from '/favicon.svg'
 import './App.css'
 
 type MatchPhase = 'waiting' | 'playing' | 'finished'
-type ConnectionStatus = 'offline' | 'connecting' | 'connected' | 'reconnecting'
+type ConnectionStatus = 'offline' | 'connecting' | 'connected' | 'reconnecting' | 'failed'
 
 function App() {
-  const [screen, setScreen] = useState<'home' | 'lobby' | 'match'>('home')
+  const initialJoinCode = matchCodeFromLocation()
+  const [screen, setScreen] = useState<'home' | 'lobby' | 'match'>(() => initialJoinCode ? 'lobby' : 'home')
   const [game, setGame] = useState<GameState>(() => createGame())
   const [notice, setNotice] = useState('')
   const [turnTimer, setTurnTimer] = useState<{ player: Player; seconds: number }>({ player: 'one', seconds: 30 })
-  const [matchCode, setMatchCode] = useState('')
+  const [matchCode, setMatchCode] = useState(initialJoinCode)
   const [session, setSession] = useState<{ code: string; player: Player; token: string } | null>(null)
   const [deadline, setDeadline] = useState(0)
   const [phase, setPhase] = useState<MatchPhase>('waiting')
@@ -20,6 +22,7 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('offline')
   const socket = useRef<WebSocket | null>(null)
   const retryAttempt = useRef(0)
+  const [retryVersion, setRetryVersion] = useState(0)
   const player = game.currentPlayer
   const playerName = player === 'one' ? 'You' : 'Player 2'
   const secondsRemaining = turnTimer.player === player ? turnTimer.seconds : 30
@@ -70,18 +73,21 @@ function App() {
           if (message.type === 'error') setNotice(message.message ?? 'The server rejected that move. Nothing changed.')
         } catch { setNotice('The match server sent an unreadable update. Reconnecting…'); connection.close() }
       }
-      connection.onclose = () => {
+      connection.onerror = () => { if (!stopped && socket.current === connection) setNotice('The match connection encountered an error. Retrying…') }
+      connection.onclose = (event) => {
         if (stopped || socket.current !== connection) return
         socket.current = null
-        setConnectionStatus('reconnecting')
-        setNotice('Connection lost. Reconnecting to your match…')
+        const failed = retryAttempt.current >= 5
+        setConnectionStatus(failed ? 'failed' : 'reconnecting')
+        const detail = event.code === 1008 ? 'Your match session was rejected. Return to the lobby and join again.' : event.code === 1011 ? 'The match server had a temporary problem. Retrying…' : `Connection closed${event.code ? ` (${event.code})` : ''}. ${failed ? 'Unable to reconnect yet.' : 'Reconnecting…'}`
+        setNotice(detail)
         const delay = Math.min(1_000 * 2 ** retryAttempt.current++, 10_000)
         retryTimer = window.setTimeout(connect, delay)
       }
     }
     connect()
     return () => { stopped = true; if (retryTimer) window.clearTimeout(retryTimer); if (socket.current) { socket.current.close(); socket.current = null } }
-  }, [screen, session])
+  }, [retryVersion, screen, session])
   useEffect(() => {
     if (!deadline || !session || game.status !== 'playing') return
     const update = () => setTurnTimer({ player: game.currentPlayer, seconds: Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) })
@@ -102,6 +108,17 @@ function App() {
     setNotice(result.completed ? `${playerName} completed ${result.completed} box${result.completed > 1 ? 'es' : ''}!` : '')
   }
   const newGame = () => { setGame(createGame()); setNotice(''); setTurnTimer({ player: 'one', seconds: 30 }); setScreen('match') }
+  const retryConnection = () => { retryAttempt.current = 0; setRetryVersion((version) => version + 1) }
+  const copyMatchCode = async () => {
+    if (!session) return
+    setNotice(await copyText(session.code) ? 'Match code copied.' : `Copy this code: ${session.code}`)
+  }
+  const copyInviteLink = async () => {
+    if (!session) return
+    const url = inviteUrl(session.code)
+    setNotice(await copyText(url) ? 'Invite link copied.' : `Copy this invite link: ${url}`)
+  }
+  const shareWhatsApp = () => { if (session) window.open(whatsappInvite(session.code), '_blank', 'noopener,noreferrer') }
   const startOnline = async (joining: boolean) => {
     try {
       const action = joining ? 'join' : 'create'
@@ -116,8 +133,9 @@ function App() {
   const winnerPlayer = game.scores.one === game.scores.two ? null : game.scores.one > game.scores.two ? 'one' : 'two'
   const winner = game.status === 'finished' ? winnerPlayer ? (session ? winnerPlayer === session.player ? 'You win!' : 'Your friend wins!' : winnerPlayer === 'one' ? 'You win!' : 'Player 2 wins!') : 'It’s a draw.' : null
   const onlineReady = !session || (phase === 'playing' && connectionStatus === 'connected')
-  const matchStatus = phase === 'waiting' ? 'Waiting for both players' : connectionStatus === 'reconnecting' ? 'Reconnecting…' : game.status === 'finished' ? 'Match complete' : `${playerName}'s turn`
-  return <main className="match-page"><header className="match-header"><button className="back" onClick={() => { setSession(null); setScreen('home') }}>← {session ? 'Leave match' : 'Exit demo'}</button><a className="brand" href="#top"><Logo /> DotGrid</a><span className="turn-pill"><i /> {matchStatus}</span></header><section className="match-layout"><Player label={session?.player === 'one' ? 'You' : 'Friend'} colour="you" score={game.scores.one} active={phase === 'playing' && player === 'one'} /><div className="game-area"><div className="match-note" aria-live="polite">{winner ?? (notice || (phase === 'waiting' ? 'Waiting for both players to connect.' : 'Connect two dots to make your move.'))}</div>{session && <><p className="share-code">Match code: <b>{session.code}</b></p><p className="timer-note">{connectionStatus === 'connected' ? `Connected: ${connected.length}/2 players.` : connectionStatus === 'connecting' ? 'Connecting to the match server…' : 'Reconnecting automatically. Your game state is safe on the server.'}</p></>}{phase === 'playing' && game.status === 'playing' && <div className="turn-timer" aria-label={`${playerName} has ${secondsRemaining} seconds remaining`}><div className="timer-label"><span>{playerName}'s turn</span><b>{secondsRemaining}s</b></div><div className="timer-track"><i style={{ transform: `scaleX(${secondsRemaining / 30})` }} /></div></div>}<div className="game-board" role="grid" aria-label="Dots and Boxes board" style={{ '--grid-tracks': String(DOTS * 2 - 1) } as CSSProperties}>{Array.from({ length: DOTS - 1 }, (_, row) => Array.from({ length: DOTS - 1 }, (_, column) => { const owner = game.boxes[`${row}:${column}`]; return <div className={`box ${owner ? `box-${owner}` : ''}`} key={`b-${row}-${column}`} style={{ gridColumn: column * 2 + 2, gridRow: row * 2 + 2 }} /> }))}{cells.map((_, i) => <span className="dot" key={`d-${i}`} style={{ gridColumn: (i % DOTS) * 2 + 1, gridRow: Math.floor(i / DOTS) * 2 + 1 }} />)}<Edges game={game} move={move} interactive={onlineReady} /></div><p className="timer-note">{session ? 'Authoritative match state is held by the Cloudflare server.' : 'Developer demo only — the live match timer is server-enforced.'}</p>{!session && <button className="new-game" onClick={newGame}>{game.status === 'finished' ? 'Play again' : 'Restart demo'}</button>}</div><Player label={session?.player === 'two' ? 'You' : 'Friend'} colour="opponent" score={game.scores.two} active={phase === 'playing' && player === 'two'} /></section></main>
+  const matchStatus = connectionStatus === 'failed' ? 'Unable to reconnect' : connectionStatus === 'reconnecting' ? 'Reconnecting…' : connectionStatus === 'connecting' ? 'Connecting to match…' : phase === 'waiting' ? 'Waiting for opponent' : game.status === 'finished' ? 'Match complete' : `${playerName}'s turn`
+  const connectionMessage = connectionStatus === 'connected' ? (phase === 'waiting' ? 'Waiting for opponent' : `${connected.length}/2 players connected`) : connectionStatus === 'connecting' ? 'Connecting to match…' : connectionStatus === 'failed' ? 'Unable to reconnect — retrying automatically.' : 'Reconnecting…'
+  return <main className="match-page"><header className="match-header"><button className="back" onClick={() => { setSession(null); setScreen('home') }}>← {session ? 'Leave match' : 'Exit demo'}</button><a className="brand" href="#top"><Logo /> DotGrid</a><span className="turn-pill"><i /> {matchStatus}</span></header><section className="match-layout"><Player label={session?.player === 'one' ? 'You' : 'Friend'} colour="you" score={game.scores.one} active={phase === 'playing' && player === 'one'} /><div className="game-area"><div className="match-note" aria-live="polite">{winner ?? (notice || (phase === 'waiting' ? 'Waiting for opponent.' : 'Connect two dots to make your move.'))}</div>{session && <><p className="share-code">Match code: <b>{session.code}</b></p>{phase === 'waiting' && <div className="lobby-actions share-actions"><button className="new-game" onClick={copyMatchCode}>Copy Match Code</button><button className="new-game" onClick={copyInviteLink}>Copy Invite Link</button><button className="new-game" onClick={shareWhatsApp}>Share on WhatsApp</button></div>}<p className="timer-note">{connectionMessage}</p>{connectionStatus === 'failed' && <button className="new-game" onClick={retryConnection}>Retry now</button>}</>}{phase === 'playing' && game.status === 'playing' && <div className="turn-timer" aria-label={`${playerName} has ${secondsRemaining} seconds remaining`}><div className="timer-label"><span>{playerName}'s turn</span><b>{secondsRemaining}s</b></div><div className="timer-track"><i style={{ transform: `scaleX(${secondsRemaining / 30})` }} /></div></div>}<div className="game-board" role="grid" aria-label="Dots and Boxes board" style={{ '--grid-tracks': String(DOTS * 2 - 1) } as CSSProperties}>{Array.from({ length: DOTS - 1 }, (_, row) => Array.from({ length: DOTS - 1 }, (_, column) => { const owner = game.boxes[`${row}:${column}`]; return <div className={`box ${owner ? `box-${owner}` : ''}`} key={`b-${row}-${column}`} style={{ gridColumn: column * 2 + 2, gridRow: row * 2 + 2 }} /> }))}{cells.map((_, i) => <span className="dot" key={`d-${i}`} style={{ gridColumn: (i % DOTS) * 2 + 1, gridRow: Math.floor(i / DOTS) * 2 + 1 }} />)}<Edges game={game} move={move} interactive={onlineReady} /></div><p className="timer-note">{session ? '' : 'Developer demo only — the live match timer is server-enforced.'}</p>{!session && <button className="new-game" onClick={newGame}>{game.status === 'finished' ? 'Play again' : 'Restart demo'}</button>}</div><Player label={session?.player === 'two' ? 'You' : 'Friend'} colour="opponent" score={game.scores.two} active={phase === 'playing' && player === 'two'} /></section></main>
 }
 
 function Edges({ game, move, interactive }: { game: GameState; move: (orientation: Orientation, row: number, column: number) => void; interactive: boolean }) { return <>{Array.from({ length: DOTS }, (_, row) => Array.from({ length: DOTS - 1 }, (_, column) => { const key = `h:${row}:${column}`, owner = game.edges[key]; return <button aria-label={`Horizontal line ${row + 1}, ${column + 1}`} className={`edge horizontal ${owner ? `edge-${owner}` : ''}`} disabled={Boolean(owner) || game.status === 'finished' || !interactive} onClick={() => move('h', row, column)} key={key} style={{ gridColumn: column * 2 + 2, gridRow: row * 2 + 1 }} /> }))}{Array.from({ length: DOTS - 1 }, (_, row) => Array.from({ length: DOTS }, (_, column) => { const key = `v:${row}:${column}`, owner = game.edges[key]; return <button aria-label={`Vertical line ${row + 1}, ${column + 1}`} className={`edge vertical ${owner ? `edge-${owner}` : ''}`} disabled={Boolean(owner) || game.status === 'finished' || !interactive} onClick={() => move('v', row, column)} key={key} style={{ gridColumn: column * 2 + 1, gridRow: row * 2 + 2 }} /> }))}</> }
